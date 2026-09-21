@@ -1,23 +1,43 @@
 const request = require('supertest');
 const app = require('../service');
-const { DB } = require('../database/database.js');
-const { authHeader, createAdminUser, expectValidJwt, loginUser, randomName, registerRandomDiner } = require('./testHelpers.js');
+const {
+  authHeader,
+  cleanupTestData,
+  createAuthenticatedAdmin,
+  createTestFranchise,
+  createTestMenuItem,
+  createTestStore,
+  expectValidJwt,
+  randomName,
+  registerRandomDiner,
+  trackTestMenuItem,
+} = require('./testHelpers.js');
 
 let diner;
 let menuItem;
+let orderLocation;
 
 beforeAll(async () => {
   diner = await registerRandomDiner();
   expect(diner.response.status).toBe(200);
   expectValidJwt(diner.token);
 
-  menuItem = await DB.addMenuItem({
+  menuItem = await createTestMenuItem({
     title: randomName('order-menu-item'),
     description: 'Menu item used by order route tests',
     image: 'order-test.png',
     price: 0.01,
   });
+
+  const franchise = await createTestFranchise({
+    name: randomName('order-franchise'),
+    admins: [{ email: diner.credentials.email }],
+  });
+  const store = await createTestStore(franchise.id, { name: randomName('order-store') });
+  orderLocation = { franchiseId: franchise.id, storeId: store.id };
 });
+
+afterAll(cleanupTestData);
 
 afterEach(() => {
   jest.restoreAllMocks();
@@ -55,12 +75,13 @@ test('PUT /api/order/menu returns 403 for non-admin user', async () => {
 });
 
 test('PUT /api/order/menu allows admin to add menu item and returns updated menu', async () => {
-  const admin = await createAdminUser();
-  const loginResponse = await loginUser(admin.email, admin.password);
-  expect(loginResponse.status).toBe(200);
-  expectValidJwt(loginResponse.body.token);
+  const admin = await createAuthenticatedAdmin();
+  expect(admin.response.status).toBe(200);
+  expectValidJwt(admin.token);
   const item = newMenuItem();
-  const response = await request(app).put('/api/order/menu').set(authHeader(loginResponse.body.token)).send(item);
+  const response = await request(app).put('/api/order/menu').set(authHeader(admin.token)).send(item);
+  const createdItem = response.body.find((menuEntry) => menuEntry.title === item.title);
+  trackTestMenuItem(createdItem);
 
   expect(response.status).toBe(200);
   expect(response.body).toEqual(
@@ -91,8 +112,8 @@ test('GET /api/order returns diner orders when authenticated', async () => {
   });
 });
 
-test('POST /api/order returns order and jwt when factory succeeds', async () => {
-  mockFactoryResponse({ ok: true, jwt: 'factory-jwt' });
+test('POST /api/order returns order and jwt and sends the correct factory payload', async () => {
+  const fetchMock = mockFactoryResponse({ ok: true, jwt: 'factory-jwt' });
   const order = newOrder();
 
   const response = await request(app).post('/api/order').set(authHeader(diner.token)).send(order);
@@ -102,24 +123,6 @@ test('POST /api/order returns order and jwt when factory succeeds', async () => 
     order: { ...order, id: expect.any(Number) },
     jwt: 'factory-jwt',
   });
-});
-
-test('POST /api/order returns 500 with failure message when factory fails', async () => {
-  mockFactoryResponse({ ok: false });
-
-  const response = await request(app).post('/api/order').set(authHeader(diner.token)).send(newOrder());
-
-  expect(response.status).toBe(500);
-  expect(response.body).toMatchObject({ message: 'Failed to fulfill order at factory' });
-});
-
-test('POST /api/order sends diner and order payload to factory', async () => {
-  const fetchMock = mockFactoryResponse({ ok: true, jwt: 'factory-jwt' });
-  const order = newOrder();
-
-  const response = await request(app).post('/api/order').set(authHeader(diner.token)).send(order);
-
-  expect(response.status).toBe(200);
   expect(fetchMock).toHaveBeenCalledTimes(1);
   const requestOptions = fetchMock.mock.calls[0][1];
   expect(JSON.parse(requestOptions.body)).toEqual({
@@ -130,6 +133,15 @@ test('POST /api/order sends diner and order payload to factory', async () => {
     },
     order: { ...order, id: expect.any(Number) },
   });
+});
+
+test('POST /api/order returns 500 with failure message when factory fails', async () => {
+  mockFactoryResponse({ ok: false });
+
+  const response = await request(app).post('/api/order').set(authHeader(diner.token)).send(newOrder());
+
+  expect(response.status).toBe(500);
+  expect(response.body).toMatchObject({ message: 'Failed to fulfill order at factory' });
 });
 
 function newMenuItem() {
@@ -143,8 +155,8 @@ function newMenuItem() {
 
 function newOrder() {
   return {
-    franchiseId: 1,
-    storeId: 1,
+    franchiseId: orderLocation.franchiseId,
+    storeId: orderLocation.storeId,
     items: [
       {
         menuId: menuItem.id,

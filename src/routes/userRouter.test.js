@@ -1,6 +1,8 @@
 const request = require('supertest');
 const app = require('../service');
-const { authHeader, createAdminUser, expectValidJwt, loginUser, randomEmail, randomName, registerRandomDiner } = require('./testHelpers.js');
+const { authHeader, cleanupTestData, createAuthenticatedAdmin, expectValidJwt, randomEmail, randomName, registerRandomDiner } = require('./testHelpers.js');
+
+afterAll(cleanupTestData);
 
 test('GET /api/user/me returns 401 without token', async () => {
   const response = await request(app).get('/api/user/me');
@@ -54,8 +56,9 @@ test('PUT /api/user/:userId returns 403 when a non-admin updates another user', 
 });
 
 test('PUT /api/user/:userId allows an admin to update another user', async () => {
-  const admin = await createAdminUser();
-  const adminLogin = await loginUser(admin.email, admin.password);
+  const admin = await createAuthenticatedAdmin();
+  expect(admin.response.status).toBe(200);
+  expectValidJwt(admin.token);
   const diner = await registerRandomDiner();
   const update = {
     name: randomName('admin-updated-diner'),
@@ -63,7 +66,7 @@ test('PUT /api/user/:userId allows an admin to update another user', async () =>
     password: 'admin-updated-password',
   };
 
-  const response = await request(app).put(`/api/user/${diner.user.id}`).set(authHeader(adminLogin.body.token)).send(update);
+  const response = await request(app).put(`/api/user/${diner.user.id}`).set(authHeader(admin.token)).send(update);
 
   expect(response.status).toBe(200);
   expect(response.body.user).toMatchObject({

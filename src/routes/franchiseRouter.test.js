@@ -1,16 +1,27 @@
 const request = require('supertest');
 const app = require('../service');
 const { DB } = require('../database/database.js');
-const { authHeader, createAdminUser, loginUser, randomName, registerRandomDiner } = require('./testHelpers.js');
+const {
+  authHeader,
+  cleanupTestData,
+  createAuthenticatedAdmin,
+  createTestFranchise,
+  createTestStore,
+  loginUser,
+  randomName,
+  registerRandomDiner,
+  trackTestFranchise,
+} = require('./testHelpers.js');
 
 let adminToken;
 
 beforeAll(async () => {
-  const admin = await createAdminUser();
-  const loginResponse = await loginUser(admin.email, admin.password);
-  expect(loginResponse.status).toBe(200);
-  adminToken = loginResponse.body.token;
+  const admin = await createAuthenticatedAdmin();
+  expect(admin.response.status).toBe(200);
+  adminToken = admin.token;
 });
+
+afterAll(cleanupTestData);
 
 test('GET /api/franchise returns franchises and more flag without auth', async () => {
   const response = await request(app).get('/api/franchise');
@@ -78,6 +89,7 @@ test('POST /api/franchise allows admin to create franchise with admin email list
   };
 
   const response = await request(app).post('/api/franchise').set(authHeader(adminToken)).send(franchiseRequest);
+  trackTestFranchise(response.body);
 
   expect(response.status).toBe(200);
   expect(response.body).toMatchObject({
@@ -155,7 +167,7 @@ test('POST /api/franchise/:franchiseId/store allows admin or franchise admin to 
 test('DELETE /api/franchise/:franchiseId/store/:storeId returns 403 when user lacks permission', async () => {
   const franchiseAdmin = await registerRandomDiner();
   const franchise = await createFranchiseFor(franchiseAdmin);
-  const store = await DB.createStore(franchise.id, { name: randomName('protected-store') });
+  const store = await createTestStore(franchise.id, { name: randomName('protected-store') });
   const diner = await registerRandomDiner();
 
   const response = await request(app)
@@ -169,7 +181,7 @@ test('DELETE /api/franchise/:franchiseId/store/:storeId returns 403 when user la
 test('DELETE /api/franchise/:franchiseId/store/:storeId allows authorized deletion', async () => {
   const franchiseAdmin = await registerRandomDiner();
   const franchise = await createFranchiseFor(franchiseAdmin);
-  const store = await DB.createStore(franchise.id, { name: randomName('deletable-store') });
+  const store = await createTestStore(franchise.id, { name: randomName('deletable-store') });
   const franchiseAdminLogin = await loginUser(franchiseAdmin.credentials.email, franchiseAdmin.credentials.password);
 
   const response = await request(app)
@@ -184,7 +196,7 @@ test('DELETE /api/franchise/:franchiseId/store/:storeId allows authorized deleti
 });
 
 async function createFranchiseFor(franchiseAdmin) {
-  return DB.createFranchise({
+  return createTestFranchise({
     name: randomName('franchise'),
     admins: [{ email: franchiseAdmin.credentials.email }],
   });
