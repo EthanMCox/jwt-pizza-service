@@ -176,14 +176,14 @@ test('GET /api/user returns an empty list for a page past the end', async () => 
 
 test('GET /api/user filters users by exact name', async () => {
   const admin = await createAuthenticatedAdmin();
-  const { diners } = await registerDinersWithSharedName(2);
-  const target = diners[0].user;
+  const target = await registerRandomDiner({ name: randomName('exact') });
+  await registerRandomDiner({ name: `${target.user.name}-extra` });
 
-  const response = await request(app).get(`/api/user?name=${target.name}`).set(authHeader(admin.token));
+  const response = await request(app).get(`/api/user?name=${target.user.name}`).set(authHeader(admin.token));
 
   expect(response.status).toBe(200);
   expect(response.body.users).toHaveLength(1);
-  expect(response.body.users[0]).toMatchObject({ id: target.id, name: target.name });
+  expect(response.body.users[0]).toMatchObject({ id: target.user.id, name: target.user.name });
 });
 
 test('GET /api/user filters users by name with a wildcard', async () => {
