@@ -102,3 +102,120 @@ async function registerUser(service) {
 
   return [registerRes.body.user, registerRes.body.token];
 }
+
+async function registerDinersWithSharedName(count) {
+  const sharedName = randomName('list-users');
+  const diners = [];
+  for (let i = 0; i < count; i++) {
+    diners.push(await registerRandomDiner({ name: `${sharedName}-${i}` }));
+  }
+  return { sharedName, diners };
+}
+
+test('GET /api/user returns a list of users without passwords', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const diner = await registerRandomDiner();
+
+  const response = await request(app).get(`/api/user?name=${diner.user.name}`).set(authHeader(admin.token));
+
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({
+    users: [
+      {
+        id: diner.user.id,
+        name: diner.user.name,
+        email: diner.user.email,
+        roles: [{ role: 'diner' }],
+      },
+    ],
+    more: false,
+  });
+  expect(response.body.users[0]).not.toHaveProperty('password');
+});
+
+test('GET /api/user returns at most 10 users by default', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const { sharedName } = await registerDinersWithSharedName(11);
+
+  const response = await request(app).get(`/api/user?name=${sharedName}*`).set(authHeader(admin.token));
+
+  expect(response.status).toBe(200);
+  expect(response.body.users).toHaveLength(10);
+  expect(response.body.more).toBe(true);
+});
+
+test('GET /api/user paginates results using page and limit', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const { sharedName, diners } = await registerDinersWithSharedName(3);
+
+  const firstPage = await request(app).get(`/api/user?page=0&limit=2&name=${sharedName}*`).set(authHeader(admin.token));
+  const secondPage = await request(app).get(`/api/user?page=1&limit=2&name=${sharedName}*`).set(authHeader(admin.token));
+
+  expect(firstPage.status).toBe(200);
+  expect(firstPage.body.users).toHaveLength(2);
+  expect(firstPage.body.more).toBe(true);
+
+  expect(secondPage.status).toBe(200);
+  expect(secondPage.body.users).toHaveLength(1);
+  expect(secondPage.body.more).toBe(false);
+
+  const returnedIds = [...firstPage.body.users, ...secondPage.body.users].map((user) => user.id).sort();
+  const expectedIds = diners.map((diner) => diner.user.id).sort();
+  expect(returnedIds).toEqual(expectedIds);
+});
+
+test('GET /api/user returns an empty list for a page past the end', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const { sharedName } = await registerDinersWithSharedName(2);
+
+  const response = await request(app).get(`/api/user?page=2&limit=2&name=${sharedName}*`).set(authHeader(admin.token));
+
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ users: [], more: false });
+});
+
+test('GET /api/user filters users by exact name', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const { diners } = await registerDinersWithSharedName(2);
+  const target = diners[0].user;
+
+  const response = await request(app).get(`/api/user?name=${target.name}`).set(authHeader(admin.token));
+
+  expect(response.status).toBe(200);
+  expect(response.body.users).toHaveLength(1);
+  expect(response.body.users[0]).toMatchObject({ id: target.id, name: target.name });
+});
+
+test('GET /api/user filters users by name with a wildcard', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const { sharedName, diners } = await registerDinersWithSharedName(3);
+  const unrelatedDiner = await registerRandomDiner();
+
+  const response = await request(app).get(`/api/user?name=${sharedName}*`).set(authHeader(admin.token));
+
+  expect(response.status).toBe(200);
+  const returnedIds = response.body.users.map((user) => user.id).sort();
+  expect(returnedIds).toEqual(diners.map((diner) => diner.user.id).sort());
+  expect(returnedIds).not.toContain(unrelatedDiner.user.id);
+});
+
+test('GET /api/user filters users by name containing a substring', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const target = await registerRandomDiner({ name: `prefix-${randomName('contains')}-suffix` });
+  const middle = target.user.name.slice('prefix-'.length, -'-suffix'.length);
+
+  const response = await request(app).get(`/api/user?name=*${middle}*`).set(authHeader(admin.token));
+
+  expect(response.status).toBe(200);
+  expect(response.body.users).toHaveLength(1);
+  expect(response.body.users[0]).toMatchObject({ id: target.user.id, name: target.user.name });
+});
+
+test('GET /api/user returns an empty list when no names match', async () => {
+  const admin = await createAuthenticatedAdmin();
+
+  const response = await request(app).get(`/api/user?name=${randomName('no-such-user')}`).set(authHeader(admin.token));
+
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ users: [], more: false });
+});
