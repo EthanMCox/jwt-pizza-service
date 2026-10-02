@@ -83,10 +83,13 @@ test('list users unauthorized', async () => {
   expect(listUsersRes.status).toBe(401);
 });
 
-test('list users', async () => {
+test('GET /api/user returns 403 for non-admin user', async () => {
   const diner = await registerRandomDiner();
-  const listUsersRes = await request(app).get('/api/user').set(authHeader(diner.token));
-  expect(listUsersRes.status).toBe(200);
+
+  const response = await request(app).get('/api/user').set(authHeader(diner.token));
+
+  expect(response.status).toBe(403);
+  expect(response.body).toMatchObject({ message: 'unable to list users' });
 });
 
 async function registerDinersWithSharedName(count) {
