@@ -201,3 +201,45 @@ async function createFranchiseFor(franchiseAdmin) {
     admins: [{ email: franchiseAdmin.credentials.email }],
   });
 }
+
+test('GET /api/franchise paginates results using page and limit', async () => {
+  const sharedName = randomName('list-franchises');
+  const franchises = [];
+  for (let i = 0; i < 3; i++) {
+    franchises.push(await createTestFranchise({ name: `${sharedName}-${i}`, admins: [] }));
+  }
+
+  const firstPage = await request(app).get(`/api/franchise?page=0&limit=2&name=${sharedName}*`);
+  const secondPage = await request(app).get(`/api/franchise?page=1&limit=2&name=${sharedName}*`);
+
+  expect(firstPage.status).toBe(200);
+  expect(firstPage.body.franchises).toHaveLength(2);
+  expect(firstPage.body.more).toBe(true);
+
+  expect(secondPage.status).toBe(200);
+  expect(secondPage.body.franchises).toHaveLength(1);
+  expect(secondPage.body.more).toBe(false);
+
+  const returnedIds = [...firstPage.body.franchises, ...secondPage.body.franchises].map((franchise) => franchise.id).sort();
+  expect(returnedIds).toEqual(franchises.map((franchise) => franchise.id).sort());
+});
+
+test('GET /api/franchise fetches only one extra row to check for more', async () => {
+  const querySpy = jest.spyOn(DB, 'query');
+  try {
+    const response = await request(app).get('/api/franchise?page=1&limit=2');
+
+    expect(response.status).toBe(200);
+    const franchiseQueries = querySpy.mock.calls.map(([, sql]) => sql).filter((sql) => sql.includes('FROM franchise WHERE name LIKE'));
+    expect(franchiseQueries).toEqual([expect.stringContaining('LIMIT 3 OFFSET 2')]);
+  } finally {
+    querySpy.mockRestore();
+  }
+});
+
+test.each(['page=abc', 'page=-1', 'page=1.5', 'limit=abc', 'limit=0', 'limit=-1', 'limit=1.5'])('GET /api/franchise returns 400 for invalid %s', async (query) => {
+  const response = await request(app).get(`/api/franchise?${query}`);
+
+  expect(response.status).toBe(400);
+  expect(response.body).toMatchObject({ message: 'invalid page or limit' });
+});

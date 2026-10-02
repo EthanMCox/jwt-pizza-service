@@ -100,13 +100,11 @@ class DB {
   }
 
   async getUsers(page = 0, limit = 10, nameFilter = '*') {
-    const connection = await this.getConnection();
-
-    page = Number(page);
-    limit = Number(limit);
+    ({ page, limit } = this.parsePagination(page, limit));
     const offset = page * limit;
     nameFilter = nameFilter.replace(/\*/g, '%');
 
+    const connection = await this.getConnection();
     try {
       let users = await this.query(connection, `SELECT id, name, email FROM user WHERE name LIKE ? LIMIT ${limit + 1} OFFSET ${offset}`, [nameFilter]);
 
@@ -232,11 +230,11 @@ class DB {
   }
 
   async getFranchises(authUser, page = 0, limit = 10, nameFilter = '*') {
-    const connection = await this.getConnection();
-
+    ({ page, limit } = this.parsePagination(page, limit));
     const offset = page * limit;
     nameFilter = nameFilter.replace(/\*/g, '%');
 
+    const connection = await this.getConnection();
     try {
       let franchises = await this.query(connection, `SELECT id, name FROM franchise WHERE name LIKE ? LIMIT ${limit + 1} OFFSET ${offset}`, [nameFilter]);
 
@@ -307,6 +305,15 @@ class DB {
     } finally {
       connection.end();
     }
+  }
+
+  parsePagination(page, limit) {
+    page = Number(page);
+    limit = Number(limit);
+    if (!Number.isInteger(page) || page < 0 || !Number.isInteger(limit) || limit < 1) {
+      throw new StatusCodeError('invalid page or limit', 400);
+    }
+    return { page, limit };
   }
 
   getOffset(currentPage = 1, listPerPage) {

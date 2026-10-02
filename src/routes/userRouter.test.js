@@ -208,3 +208,12 @@ test('GET /api/user returns an empty list when no names match', async () => {
   expect(response.status).toBe(200);
   expect(response.body).toEqual({ users: [], more: false });
 });
+
+test.each(['page=abc', 'page=-1', 'page=1.5', 'limit=abc', 'limit=0', 'limit=-1', 'limit=1.5'])('GET /api/user returns 400 for invalid %s', async (query) => {
+  const admin = await createAuthenticatedAdmin();
+
+  const response = await request(app).get(`/api/user?${query}`).set(authHeader(admin.token));
+
+  expect(response.status).toBe(400);
+  expect(response.body).toMatchObject({ message: 'invalid page or limit' });
+});
