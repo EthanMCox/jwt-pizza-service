@@ -84,24 +84,10 @@ test('list users unauthorized', async () => {
 });
 
 test('list users', async () => {
-  const [user, userToken] = await registerUser(request(app));
-  const listUsersRes = await request(app)
-    .get('/api/user')
-    .set('Authorization', 'Bearer ' + userToken);
+  const diner = await registerRandomDiner();
+  const listUsersRes = await request(app).get('/api/user').set(authHeader(diner.token));
   expect(listUsersRes.status).toBe(200);
 });
-
-async function registerUser(service) {
-  const testUser = {
-    name: 'pizza diner',
-    email: `${randomName()}@test.com`,
-    password: 'a',
-  };
-  const registerRes = await service.post('/api/auth').send(testUser);
-  registerRes.body.user.password = testUser.password;
-
-  return [registerRes.body.user, registerRes.body.token];
-}
 
 async function registerDinersWithSharedName(count) {
   const sharedName = randomName('list-users');
