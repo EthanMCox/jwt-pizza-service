@@ -286,6 +286,17 @@ test('DELETE /api/user/:userId returns 403 when a non-admin deletes themselves',
   expect(await countRows('user', 'id', diner.user.id)).toBe(1);
 });
 
+// Assumed behavior: the intended rule for admins deleting themselves is not yet specified.
+test('DELETE /api/user/:userId returns 403 when an admin deletes themselves', async () => {
+  const admin = await createAuthenticatedAdmin();
+
+  const response = await request(app).delete(`/api/user/${admin.user.id}`).set(authHeader(admin.token));
+
+  expect(response.status).toBe(403);
+  expect(response.body).toMatchObject({ message: 'unable to delete user' });
+  expect(await countRows('user', 'id', admin.user.id)).toBe(1);
+});
+
 test('DELETE /api/user/:userId returns 404 for an unknown user', async () => {
   const admin = await createAuthenticatedAdmin();
 
