@@ -1,7 +1,17 @@
 const request = require('supertest');
 const app = require('../service');
 const { DB } = require('../database/database.js');
-const { authHeader, cleanupTestData, createAuthenticatedAdmin, expectValidJwt, randomEmail, randomName, registerRandomDiner } = require('./testHelpers.js');
+const {
+  authHeader,
+  cleanupTestData,
+  createAuthenticatedAdmin,
+  createTestFranchise,
+  expectValidJwt,
+  loginUser,
+  randomEmail,
+  randomName,
+  registerRandomDiner,
+} = require('./testHelpers.js');
 
 afterAll(cleanupTestData);
 
@@ -234,4 +244,102 @@ test('GET /api/user returns users ordered by id', async () => {
   } finally {
     querySpy.mockRestore();
   }
+});
+
+async function countRows(table, column, value) {
+  const connection = await DB.getConnection();
+  try {
+    const [{ count }] = await DB.query(connection, `SELECT COUNT(*) AS count FROM ${table} WHERE ${column}=?`, [value]);
+    return count;
+  } finally {
+    connection.end();
+  }
+}
+
+test('DELETE /api/user/:userId returns 401 without token', async () => {
+  const diner = await registerRandomDiner();
+
+  const response = await request(app).delete(`/api/user/${diner.user.id}`);
+
+  expect(response.status).toBe(401);
+  expect(response.body).toMatchObject({ message: 'unauthorized' });
+});
+
+test('DELETE /api/user/:userId returns 403 when a non-admin deletes another user', async () => {
+  const diner = await registerRandomDiner();
+  const otherDiner = await registerRandomDiner();
+
+  const response = await request(app).delete(`/api/user/${otherDiner.user.id}`).set(authHeader(diner.token));
+
+  expect(response.status).toBe(403);
+  expect(response.body).toMatchObject({ message: 'unable to delete user' });
+  expect(await countRows('user', 'id', otherDiner.user.id)).toBe(1);
+});
+
+test('DELETE /api/user/:userId returns 403 when a non-admin deletes themselves', async () => {
+  const diner = await registerRandomDiner();
+
+  const response = await request(app).delete(`/api/user/${diner.user.id}`).set(authHeader(diner.token));
+
+  expect(response.status).toBe(403);
+  expect(response.body).toMatchObject({ message: 'unable to delete user' });
+  expect(await countRows('user', 'id', diner.user.id)).toBe(1);
+});
+
+test('DELETE /api/user/:userId returns 404 for an unknown user', async () => {
+  const admin = await createAuthenticatedAdmin();
+
+  const response = await request(app).delete('/api/user/999999999').set(authHeader(admin.token));
+
+  expect(response.status).toBe(404);
+  expect(response.body).toMatchObject({ message: 'unknown user' });
+});
+
+test('DELETE /api/user/:userId allows an admin to delete a user', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const diner = await registerRandomDiner();
+
+  const response = await request(app).delete(`/api/user/${diner.user.id}`).set(authHeader(admin.token));
+
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ message: 'user deleted' });
+
+  const listResponse = await request(app).get(`/api/user?name=${diner.user.name}`).set(authHeader(admin.token));
+  expect(listResponse.body.users).toEqual([]);
+
+  const loginResponse = await loginUser(diner.credentials.email, diner.credentials.password);
+  expect(loginResponse.status).toBe(404);
+});
+
+test('DELETE /api/user/:userId logs out the deleted user', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const diner = await registerRandomDiner();
+
+  await request(app).delete(`/api/user/${diner.user.id}`).set(authHeader(admin.token));
+
+  const meResponse = await request(app).get('/api/user/me').set(authHeader(diner.token));
+  expect(meResponse.status).toBe(401);
+  expect(await countRows('auth', 'userId', diner.user.id)).toBe(0);
+});
+
+test('DELETE /api/user/:userId removes the deleted user roles', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const franchisee = await registerRandomDiner();
+  await createTestFranchise({ name: randomName('deleted-franchisee'), admins: [{ email: franchisee.user.email }] });
+
+  await request(app).delete(`/api/user/${franchisee.user.id}`).set(authHeader(admin.token));
+
+  const franchisesResponse = await request(app).get(`/api/franchise/${franchisee.user.id}`).set(authHeader(admin.token));
+  expect(franchisesResponse.body).toEqual([]);
+  expect(await countRows('userRole', 'userId', franchisee.user.id)).toBe(0);
+});
+
+test('DELETE /api/user/:userId keeps the deleted user orders', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const diner = await registerRandomDiner();
+  const order = await DB.addDinerOrder(diner.user, { franchiseId: 1, storeId: 1, items: [] });
+
+  await request(app).delete(`/api/user/${diner.user.id}`).set(authHeader(admin.token));
+
+  expect(await countRows('dinerOrder', 'id', order.id)).toBe(1);
 });
