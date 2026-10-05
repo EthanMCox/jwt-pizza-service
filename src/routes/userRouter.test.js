@@ -1,5 +1,6 @@
 const request = require('supertest');
 const app = require('../service');
+const { DB } = require('../database/database.js');
 const { authHeader, cleanupTestData, createAuthenticatedAdmin, expectValidJwt, randomEmail, randomName, registerRandomDiner } = require('./testHelpers.js');
 
 afterAll(cleanupTestData);
@@ -216,4 +217,21 @@ test.each(['page=abc', 'page=-1', 'page=1.5', 'limit=abc', 'limit=0', 'limit=-1'
 
   expect(response.status).toBe(400);
   expect(response.body).toMatchObject({ message: 'invalid page or limit' });
+});
+
+test('GET /api/user returns users ordered by id', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const { sharedName } = await registerDinersWithSharedName(3);
+  const querySpy = jest.spyOn(DB, 'query');
+  try {
+    const response = await request(app).get(`/api/user?name=${sharedName}*`).set(authHeader(admin.token));
+
+    expect(response.status).toBe(200);
+    const ids = response.body.users.map((user) => user.id);
+    expect(ids).toEqual([...ids].sort((a, b) => a - b));
+    const userQueries = querySpy.mock.calls.map(([, sql]) => sql).filter((sql) => sql.includes('FROM user WHERE name LIKE'));
+    expect(userQueries).toEqual([expect.stringContaining('ORDER BY id')]);
+  } finally {
+    querySpy.mockRestore();
+  }
 });

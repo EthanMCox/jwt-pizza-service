@@ -106,7 +106,7 @@ class DB {
 
     const connection = await this.getConnection();
     try {
-      let users = await this.query(connection, `SELECT id, name, email FROM user WHERE name LIKE ? LIMIT ${limit + 1} OFFSET ${offset}`, [nameFilter]);
+      let users = await this.query(connection, `SELECT id, name, email FROM user WHERE name LIKE ? ORDER BY id LIMIT ${limit + 1} OFFSET ${offset}`, [nameFilter]);
 
       const more = users.length > limit;
       if (more) {
@@ -236,7 +236,7 @@ class DB {
 
     const connection = await this.getConnection();
     try {
-      let franchises = await this.query(connection, `SELECT id, name FROM franchise WHERE name LIKE ? LIMIT ${limit + 1} OFFSET ${offset}`, [nameFilter]);
+      let franchises = await this.query(connection, `SELECT id, name FROM franchise WHERE name LIKE ? ORDER BY id LIMIT ${limit + 1} OFFSET ${offset}`, [nameFilter]);
 
       const more = franchises.length > limit;
       if (more) {

@@ -243,3 +243,22 @@ test.each(['page=abc', 'page=-1', 'page=1.5', 'limit=abc', 'limit=0', 'limit=-1'
   expect(response.status).toBe(400);
   expect(response.body).toMatchObject({ message: 'invalid page or limit' });
 });
+
+test('GET /api/franchise returns franchises ordered by id', async () => {
+  const sharedName = randomName('ordered-franchises');
+  for (let i = 0; i < 3; i++) {
+    await createTestFranchise({ name: `${sharedName}-${i}`, admins: [] });
+  }
+  const querySpy = jest.spyOn(DB, 'query');
+  try {
+    const response = await request(app).get(`/api/franchise?name=${sharedName}*`);
+
+    expect(response.status).toBe(200);
+    const ids = response.body.franchises.map((franchise) => franchise.id);
+    expect(ids).toEqual([...ids].sort((a, b) => a - b));
+    const franchiseQueries = querySpy.mock.calls.map(([, sql]) => sql).filter((sql) => sql.includes('FROM franchise WHERE name LIKE'));
+    expect(franchiseQueries).toEqual([expect.stringContaining('ORDER BY id')]);
+  } finally {
+    querySpy.mockRestore();
+  }
+});
