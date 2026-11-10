@@ -121,6 +121,18 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "userId"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "reqBody"
             },
             "properties": [
@@ -225,6 +237,7 @@
           },
           "editorMode": "code",
           "expr": "{component=\"jwt-pizza-service\"} | json",
+          "maxLines": 2000,
           "queryType": "range",
           "refId": "A"
         }
@@ -251,6 +264,7 @@
                 "path",
                 "statusCode",
                 "authorized",
+                "userId",
                 "reqBody",
                 "resBody",
                 "query",
@@ -267,15 +281,16 @@
               "Time": 0,
               "authorized": 6,
               "level": 1,
-              "message": 10,
+              "message": 11,
               "method": 3,
               "path": 4,
-              "query": 9,
-              "reqBody": 7,
-              "resBody": 8,
-              "stack": 11,
+              "query": 10,
+              "reqBody": 8,
+              "resBody": 9,
+              "stack": 12,
               "statusCode": 5,
-              "type": 2
+              "type": 2,
+              "userId": 7
             }
           }
         }
@@ -1413,8 +1428,8 @@
     "jwt-pizza"
   ],
   "time": {
-    "from": "2026-10-31T17:27:00.000Z",
-    "to": "2026-10-31T17:36:00.000Z"
+    "from": "2026-11-10T03:11:30.000Z",
+    "to": "2026-11-10T03:21:30.000Z"
   },
   "timepicker": {
     "refresh_intervals": [
@@ -1433,5 +1448,5 @@
   "timezone": "browser",
   "title": "Pizza Dashboard",
   "uid": "et2rdg8",
-  "version": 29
+  "version": 31
 }
