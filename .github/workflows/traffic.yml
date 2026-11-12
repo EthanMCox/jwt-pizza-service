@@ -1,0 +1,54 @@
+name: Simulate traffic
+
+# Keeps steady traffic on production during the chaos testing window (Friday 8 AM - 3 PM Mountain).
+# A job can run for at most 6 hours, so two overlapping runs cover the window.
+# Scheduled runs can start late, so each one starts early and stops at a fixed time.
+on:
+  schedule:
+    - cron: '30 14 * * 5' # Friday 7:30 AM MST, runs until 11:30 AM
+    - cron: '0 18 * * 5' # Friday 11:00 AM MST, runs until 3:15 PM
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: 'Minutes to run'
+        required: true
+        default: '5'
+
+jobs:
+  traffic:
+    name: Traffic
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set end time
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            end=$(date -u -d "+${{ inputs.minutes }} minutes" +%s)
+          elif [ "${{ github.event.schedule }}" = "30 14 * * 5" ]; then
+            end=$(date -u -d "18:30" +%s)
+          else
+            end=$(date -u -d "22:15" +%s)
+          fi
+          echo "end=$end" >> "$GITHUB_ENV"
+          echo "Running until $(date -u -d "@$end")"
+
+      - name: Annotate traffic start in Grafana
+        run: |
+          curl -s -X POST https://ethanmlcox.grafana.net/api/annotations \
+          -H "Authorization: Bearer ${{ secrets.GRAFANA_ACCESS_TOKEN }}" \
+          -H "Content-Type: application/json" \
+          -d '{"dashboardUID":"et2rdg8", "tags":["traffic"], "text":"Simulated traffic started" }'
+
+      - name: Simulate traffic
+        run: bash simulateTraffic.sh https://pizza-service.ethancox.click "$end"
+
+      - name: Annotate traffic end in Grafana
+        if: always()
+        run: |
+          curl -s -X POST https://ethanmlcox.grafana.net/api/annotations \
+          -H "Authorization: Bearer ${{ secrets.GRAFANA_ACCESS_TOKEN }}" \
+          -H "Content-Type: application/json" \
+          -d '{"dashboardUID":"et2rdg8", "tags":["traffic"], "text":"Simulated traffic stopped" }'
