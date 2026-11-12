@@ -40,7 +40,18 @@ orderRouter.docs = [
     example: `curl -X POST localhost:3000/api/order -H 'Content-Type: application/json' -d '{"franchiseId": 1, "storeId":1, "items":[{ "menuId": 1, "description": "Veggie", "price": 0.05 }]}'  -H 'Authorization: Bearer tttttt'`,
     response: { order: { franchiseId: 1, storeId: 1, items: [{ menuId: 1, description: 'Veggie', price: 0.05 }], id: 1 }, jwt: '1111111111' },
   },
+  {
+    method: 'PUT',
+    path: '/api/order/chaos/:state',
+    requiresAuth: true,
+    description: 'Enable or disable random order failures. Only admins can change the state',
+    example: `curl -X PUT localhost:3000/api/order/chaos/true -H 'Authorization: Bearer tttttt'`,
+    response: { chaos: true },
+  },
 ];
+
+// When enabled, half of all order requests fail. Used for chaos testing.
+let enableChaos = false;
 
 // getMenu
 orderRouter.get(
@@ -73,6 +84,27 @@ orderRouter.get(
     res.json(await DB.getOrders(req.user, req.query.page));
   })
 );
+
+// setChaos
+orderRouter.put(
+  '/chaos/:state',
+  authRouter.authenticateToken,
+  asyncHandler(async (req, res) => {
+    if (req.user.isRole(Role.Admin)) {
+      enableChaos = req.params.state === 'true';
+    }
+
+    res.json({ chaos: enableChaos });
+  })
+);
+
+// Chaos injection, checked before createOrder
+orderRouter.post('/', (req, res, next) => {
+  if (enableChaos && Math.random() < 0.5) {
+    throw new StatusCodeError('Chaos monkey', 500);
+  }
+  next();
+});
 
 // createOrder
 orderRouter.post(

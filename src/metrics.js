@@ -6,6 +6,7 @@ const ACTIVE_USER_WINDOW_MS = 5 * 60 * 1000;
 
 // Metrics stored in memory. Counters only ever grow, so a failed send loses nothing.
 const requests = { GET: 0, PUT: 0, POST: 0, DELETE: 0, OTHER: 0 };
+const httpErrors = { count: 0 }; // responses with a 5xx status
 const auth = { success: 0, failure: 0 };
 const pizzas = { sold: 0, failures: 0, revenue: 0 };
 const latency = {
@@ -20,6 +21,9 @@ function requestTracker(req, res, next) {
   res.on('finish', () => {
     const method = req.method in requests ? req.method : 'OTHER';
     requests[method]++;
+    if (res.statusCode >= 500) {
+      httpErrors.count++;
+    }
     latency.endpoint.totalMs += Date.now() - start;
     latency.endpoint.count++;
     if (req.user) {
@@ -78,6 +82,8 @@ function sendMetricsPeriodically(period) {
       Object.keys(requests).forEach((method) => {
         metrics.push(createMetric('http_requests', requests[method], '1', 'sum', 'asInt', { method }));
       });
+
+      metrics.push(createMetric('http_errors', httpErrors.count, '1', 'sum', 'asInt', {}));
 
       metrics.push(createMetric('active_users', getActiveUserCount(), '{users}', 'gauge', 'asInt', {}));
 

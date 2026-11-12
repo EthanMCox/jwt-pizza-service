@@ -144,6 +144,40 @@ test('POST /api/order returns 500 with failure message when factory fails', asyn
   expect(response.body).toMatchObject({ message: 'Failed to fulfill order at factory' });
 });
 
+test('PUT /api/order/chaos/:state returns 401 without auth token', async () => {
+  const response = await request(app).put('/api/order/chaos/true');
+
+  expect(response.status).toBe(401);
+});
+
+test('PUT /api/order/chaos/:state does not let a non-admin enable chaos', async () => {
+  const response = await request(app).put('/api/order/chaos/true').set(authHeader(diner.token));
+
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ chaos: false });
+});
+
+test('POST /api/order fails randomly while an admin has chaos enabled', async () => {
+  const admin = await createAuthenticatedAdmin();
+  const enable = await request(app).put('/api/order/chaos/true').set(authHeader(admin.token));
+  expect(enable.body).toEqual({ chaos: true });
+
+  try {
+    jest.spyOn(Math, 'random').mockReturnValue(0.1);
+    const failed = await request(app).post('/api/order').set(authHeader(diner.token)).send(newOrder());
+    expect(failed.status).toBe(500);
+    expect(failed.body).toMatchObject({ message: 'Chaos monkey' });
+
+    Math.random.mockReturnValue(0.9);
+    mockFactoryResponse({ ok: true, jwt: 'factory-jwt' });
+    const succeeded = await request(app).post('/api/order').set(authHeader(diner.token)).send(newOrder());
+    expect(succeeded.status).toBe(200);
+  } finally {
+    const disable = await request(app).put('/api/order/chaos/false').set(authHeader(admin.token));
+    expect(disable.body).toEqual({ chaos: false });
+  }
+});
+
 function newMenuItem() {
   return {
     title: randomName('new-menu-item'),
