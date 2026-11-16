@@ -1,31 +1,35 @@
 const os = require('os');
+const { diag, DiagConsoleLogger, DiagLogLevel } = require('@opentelemetry/api');
+const { MeterProvider, PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics');
+const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-http');
+const { resourceFromAttributes } = require('@opentelemetry/resources');
 const config = require('./config');
+
+
+diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.WARN);
 
 // How long after their last request a user still counts as active
 const ACTIVE_USER_WINDOW_MS = 5 * 60 * 1000;
-
-// Metrics stored in memory. Counters only ever grow, so a failed send loses nothing.
-const requests = { GET: 0, PUT: 0, POST: 0, DELETE: 0, OTHER: 0 };
-const httpErrors = { count: 0 }; // responses with a 5xx status
-const auth = { success: 0, failure: 0 };
-const pizzas = { sold: 0, failures: 0, revenue: 0 };
-const latency = {
-  endpoint: { totalMs: 0, count: 0 },
-  pizzaCreation: { totalMs: 0, count: 0 },
-};
 const activeUsers = new Map(); // userId -> time of last request
+
+
+const commonAttributes = { source: config.metrics.source };
+
+
+let instruments = null;
 
 // Middleware to track requests, endpoint latency, and active users
 function requestTracker(req, res, next) {
   const start = Date.now();
   res.on('finish', () => {
-    const method = req.method in requests ? req.method : 'OTHER';
-    requests[method]++;
+    if (!instruments) return;
+    const method = ['GET', 'PUT', 'POST', 'DELETE'].includes(req.method) ? req.method : 'OTHER';
+    instruments.httpRequests.add(1, { ...commonAttributes, method });
     if (res.statusCode >= 500) {
-      httpErrors.count++;
+      instruments.httpErrors.add(1, commonAttributes);
     }
-    latency.endpoint.totalMs += Date.now() - start;
-    latency.endpoint.count++;
+    instruments.endpointLatency.add(Date.now() - start, commonAttributes);
+    instruments.endpointLatencyRequests.add(1, commonAttributes);
     if (req.user) {
       activeUsers.set(req.user.id, Date.now());
     }
@@ -35,18 +39,19 @@ function requestTracker(req, res, next) {
 
 // Called when a user tries to log in
 function authAttempt(success) {
-  auth[success ? 'success' : 'failure']++;
+  instruments?.authAttempts.add(1, { ...commonAttributes, status: success ? 'success' : 'failure' });
 }
 
 // Called when an order is sent to the pizza factory
 function pizzaPurchase(success, latencyMs, price, pizzaCount) {
-  latency.pizzaCreation.totalMs += latencyMs;
-  latency.pizzaCreation.count++;
+  if (!instruments) return;
+  instruments.pizzaCreationLatency.add(latencyMs, commonAttributes);
+  instruments.pizzaCreationRequests.add(1, commonAttributes);
   if (success) {
-    pizzas.sold += pizzaCount;
-    pizzas.revenue += price;
+    instruments.pizzasSold.add(pizzaCount, commonAttributes);
+    instruments.pizzaRevenue.add(price, commonAttributes);
   } else {
-    pizzas.failures++;
+    instruments.pizzaCreationFailures.add(1, commonAttributes);
   }
 }
 
@@ -73,102 +78,45 @@ function getMemoryUsagePercentage() {
   return Number(memoryUsage.toFixed(2));
 }
 
-// This will periodically send metrics to Grafana
+// Starts the OpenTelemetry SDK, which exports all metrics to Grafana every `period` ms
 function sendMetricsPeriodically(period) {
-  return setInterval(() => {
-    try {
-      const metrics = [];
-
-      Object.keys(requests).forEach((method) => {
-        metrics.push(createMetric('http_requests', requests[method], '1', 'sum', 'asInt', { method }));
-      });
-
-      metrics.push(createMetric('http_errors', httpErrors.count, '1', 'sum', 'asInt', {}));
-
-      metrics.push(createMetric('active_users', getActiveUserCount(), '{users}', 'gauge', 'asInt', {}));
-
-      Object.keys(auth).forEach((status) => {
-        metrics.push(createMetric('auth_attempts', auth[status], '1', 'sum', 'asInt', { status }));
-      });
-
-      metrics.push(createMetric('cpu_usage', getCpuUsagePercentage(), '%', 'gauge', 'asDouble', {}));
-      metrics.push(createMetric('memory_usage', getMemoryUsagePercentage(), '%', 'gauge', 'asDouble', {}));
-
-      metrics.push(createMetric('pizzas_sold', pizzas.sold, '1', 'sum', 'asInt', {}));
-      metrics.push(createMetric('pizza_creation_failures', pizzas.failures, '1', 'sum', 'asInt', {}));
-      metrics.push(createMetric('pizza_revenue', pizzas.revenue, '1', 'sum', 'asDouble', {}));
-
-      // Average latency = rate(total latency) / rate(request count)
-      metrics.push(createMetric('endpoint_latency', latency.endpoint.totalMs, 'ms', 'sum', 'asDouble', {}));
-      metrics.push(createMetric('endpoint_latency_requests', latency.endpoint.count, '1', 'sum', 'asInt', {}));
-      metrics.push(createMetric('pizza_creation_latency', latency.pizzaCreation.totalMs, 'ms', 'sum', 'asDouble', {}));
-      metrics.push(createMetric('pizza_creation_requests', latency.pizzaCreation.count, '1', 'sum', 'asInt', {}));
-
-      sendMetricToGrafana(metrics);
-    } catch (error) {
-      console.error('Error sending metrics', error);
-    }
-  }, period);
-}
-
-function createMetric(metricName, metricValue, metricUnit, metricType, valueType, attributes) {
-  attributes = { ...attributes, source: config.metrics.source };
-
-  const metric = {
-    name: metricName,
-    unit: metricUnit,
-    [metricType]: {
-      dataPoints: [
-        {
-          [valueType]: metricValue,
-          timeUnixNano: Date.now() * 1000000,
-          attributes: [],
-        },
-      ],
-    },
-  };
-
-  Object.keys(attributes).forEach((key) => {
-    metric[metricType].dataPoints[0].attributes.push({
-      key: key,
-      value: { stringValue: attributes[key] },
-    });
+  const exporter = new OTLPMetricExporter({
+    url: config.metrics.endpointUrl,
+    headers: { Authorization: `Bearer ${config.metrics.accountId}:${config.metrics.apiKey}` },
   });
 
-  if (metricType === 'sum') {
-    metric[metricType].aggregationTemporality = 'AGGREGATION_TEMPORALITY_CUMULATIVE';
-    metric[metricType].isMonotonic = true;
-  }
+  const meterProvider = new MeterProvider({
+    resource: resourceFromAttributes({ 'service.name': config.metrics.source }),
+    readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: period, exportTimeoutMillis: period })],
+  });
 
-  return metric;
-}
+  const meter = meterProvider.getMeter('jwt-pizza-service');
 
-function sendMetricToGrafana(metrics) {
-  const body = {
-    resourceMetrics: [
-      {
-        scopeMetrics: [
-          {
-            metrics,
-          },
-        ],
-      },
-    ],
+  instruments = {
+    httpRequests: meter.createCounter('http_requests', { unit: '1' }),
+    httpErrors: meter.createCounter('http_errors', { unit: '1' }),
+    authAttempts: meter.createCounter('auth_attempts', { unit: '1' }),
+    pizzasSold: meter.createCounter('pizzas_sold', { unit: '1' }),
+    pizzaCreationFailures: meter.createCounter('pizza_creation_failures', { unit: '1' }),
+    pizzaRevenue: meter.createCounter('pizza_revenue', { unit: '1' }),
+    // Average latency = rate(total latency) / rate(request count)
+    endpointLatency: meter.createCounter('endpoint_latency', { unit: 'ms' }),
+    endpointLatencyRequests: meter.createCounter('endpoint_latency_requests', { unit: '1' }),
+    pizzaCreationLatency: meter.createCounter('pizza_creation_latency', { unit: 'ms' }),
+    pizzaCreationRequests: meter.createCounter('pizza_creation_requests', { unit: '1' }),
   };
 
-  fetch(`${config.metrics.endpointUrl}`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-    headers: { Authorization: `Bearer ${config.metrics.accountId}:${config.metrics.apiKey}`, 'Content-Type': 'application/json' },
-  })
-    .then((response) => {
-      if (!response.ok) {
-        throw new Error(`HTTP status: ${response.status}`);
-      }
-    })
-    .catch((error) => {
-      console.error('Error pushing metrics:', error);
-    });
+  meter.createObservableGauge('active_users', { unit: '{users}' }).addCallback((result) => {
+    result.observe(getActiveUserCount(), commonAttributes);
+  });
+  meter.createObservableGauge('cpu_usage', { unit: '%' }).addCallback((result) => {
+    result.observe(getCpuUsagePercentage(), commonAttributes);
+  });
+  meter.createObservableGauge('memory_usage', { unit: '%' }).addCallback((result) => {
+    result.observe(getMemoryUsagePercentage(), commonAttributes);
+  });
+
+  return meterProvider;
 }
 
 module.exports = { requestTracker, authAttempt, pizzaPurchase, sendMetricsPeriodically };
