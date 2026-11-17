@@ -61,6 +61,10 @@ jobs:
               apiKey: '${{ secrets.METRICS_API_KEY }}',
               accountId: '${{ secrets.METRICS_ACCOUNT_ID }}',
             },
+            dynatrace: {
+              endpointUrl: '${{ secrets.DYNATRACE_ENDPOINT_URL }}',
+              apiToken: '${{ secrets.DYNATRACE_API_TOKEN }}',
+            },
             logging: {
               source: 'jwt-pizza-service',
               endpointUrl: '${{ secrets.LOGGING_ENDPOINT_URL }}',

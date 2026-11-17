@@ -1,7 +1,8 @@
 const os = require('os');
 const { diag, DiagConsoleLogger, DiagLogLevel } = require('@opentelemetry/api');
 const { MeterProvider, PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics');
-const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-http');
+const { OTLPMetricExporter, AggregationTemporalityPreference } = require('@opentelemetry/exporter-metrics-otlp-http');
+const { OTLPMetricExporter: OTLPProtoMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-proto');
 const { resourceFromAttributes } = require('@opentelemetry/resources');
 const {
   ATTR_SERVICE_NAME,
@@ -121,6 +122,18 @@ function sendMetricsPeriodically(period) {
     url: config.metrics.endpointUrl,
     headers: { Authorization: `Bearer ${config.metrics.accountId}:${config.metrics.apiKey}` },
   });
+  const readers = [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: period, exportTimeoutMillis: period })];
+
+  if (config.dynatrace?.endpointUrl) {
+    // Dynatrace only ingests delta counters/histograms (cumulative ones are silently dropped), so this exporter asks for
+    // delta while Grafana's keeps the default cumulative. Requires Dynatrace's binary protobuf encoding, hence the proto exporter.
+    const dynatraceExporter = new OTLPProtoMetricExporter({
+      url: config.dynatrace.endpointUrl,
+      headers: { Authorization: `Bearer ${config.dynatrace.apiToken}` },
+      temporalityPreference: AggregationTemporalityPreference.DELTA,
+    });
+    readers.push(new PeriodicExportingMetricReader({ exporter: dynatraceExporter, exportIntervalMillis: period, exportTimeoutMillis: period }));
+  }
 
   const meterProvider = new MeterProvider({
 
@@ -129,7 +142,7 @@ function sendMetricsPeriodically(period) {
       [ATTR_SERVICE_VERSION]: version.version,
       [ATTR_SERVICE_INSTANCE_ID]: os.hostname(),
     }),
-    readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: period, exportTimeoutMillis: period })],
+    readers,
   });
 
   const meter = meterProvider.getMeter('jwt-pizza-service', version.version);
