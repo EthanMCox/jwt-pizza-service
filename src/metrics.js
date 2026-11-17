@@ -3,55 +3,79 @@ const { diag, DiagConsoleLogger, DiagLogLevel } = require('@opentelemetry/api');
 const { MeterProvider, PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics');
 const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-http');
 const { resourceFromAttributes } = require('@opentelemetry/resources');
+const {
+  ATTR_SERVICE_NAME,
+  ATTR_SERVICE_VERSION,
+  ATTR_SERVICE_INSTANCE_ID,
+  ATTR_HTTP_REQUEST_METHOD,
+  ATTR_HTTP_ROUTE,
+  ATTR_HTTP_RESPONSE_STATUS_CODE,
+  ATTR_URL_SCHEME,
+  ATTR_ERROR_TYPE,
+  METRIC_HTTP_SERVER_REQUEST_DURATION,
+} = require('@opentelemetry/semantic-conventions');
 const config = require('./config');
+const version = require('./version.json');
 
 
 diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.WARN);
+
+
+const KNOWN_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'CONNECT', 'OPTIONS', 'TRACE', 'PATCH']);
+
+
+const DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10];
 
 // How long after their last request a user still counts as active
 const ACTIVE_USER_WINDOW_MS = 5 * 60 * 1000;
 const activeUsers = new Map(); // userId -> time of last request
 
-
-const commonAttributes = { source: config.metrics.source };
-
-
+// Instruments are created when export starts (see sendMetricsPeriodically), so tests
+// that load service.js never start an exporter. Until then, recording is a no-op.
 let instruments = null;
 
-// Middleware to track requests, endpoint latency, and active users
+// Middleware: records http.server.request.duration (which also gives request and error counts) and active users
 function requestTracker(req, res, next) {
-  const start = Date.now();
+  const start = process.hrtime.bigint();
   res.on('finish', () => {
-    if (!instruments) return;
-    const method = ['GET', 'PUT', 'POST', 'DELETE'].includes(req.method) ? req.method : 'OTHER';
-    instruments.httpRequests.add(1, { ...commonAttributes, method });
-    if (res.statusCode >= 500) {
-      instruments.httpErrors.add(1, commonAttributes);
-    }
-    instruments.endpointLatency.add(Date.now() - start, commonAttributes);
-    instruments.endpointLatencyRequests.add(1, commonAttributes);
     if (req.user) {
       activeUsers.set(req.user.id, Date.now());
     }
+    if (!instruments) return;
+
+    const attributes = {
+      [ATTR_HTTP_REQUEST_METHOD]: KNOWN_METHODS.has(req.method) ? req.method : '_OTHER',
+      [ATTR_HTTP_RESPONSE_STATUS_CODE]: res.statusCode,
+      [ATTR_URL_SCHEME]: req.protocol,
+    };
+
+    if (req.route) {
+      const route = req.baseUrl + req.route.path;
+      attributes[ATTR_HTTP_ROUTE] = route.length > 1 && route.endsWith('/') ? route.slice(0, -1) : route;
+    }
+    if (res.statusCode >= 500) {
+      attributes[ATTR_ERROR_TYPE] = String(res.statusCode);
+    }
+    const seconds = Number(process.hrtime.bigint() - start) / 1e9;
+    instruments.httpServerDuration.record(seconds, attributes);
   });
   next();
 }
 
 // Called when a user tries to log in
 function authAttempt(success) {
-  instruments?.authAttempts.add(1, { ...commonAttributes, status: success ? 'success' : 'failure' });
+  instruments?.authAttempts.add(1, { 'pizza.auth.outcome': success ? 'success' : 'failure' });
 }
 
 // Called when an order is sent to the pizza factory
 function pizzaPurchase(success, latencyMs, price, pizzaCount) {
   if (!instruments) return;
-  instruments.pizzaCreationLatency.add(latencyMs, commonAttributes);
-  instruments.pizzaCreationRequests.add(1, commonAttributes);
+  const attributes = { 'pizza.order.outcome': success ? 'success' : 'failure' };
+  instruments.orders.add(1, attributes);
+  instruments.factoryDuration.record(latencyMs / 1000, attributes);
   if (success) {
-    instruments.pizzasSold.add(pizzaCount, commonAttributes);
-    instruments.pizzaRevenue.add(price, commonAttributes);
-  } else {
-    instruments.pizzaCreationFailures.add(1, commonAttributes);
+    instruments.pizzasSold.add(pizzaCount);
+    instruments.revenue.add(price);
   }
 }
 
@@ -65,17 +89,30 @@ function getActiveUserCount() {
   return activeUsers.size;
 }
 
-function getCpuUsagePercentage() {
-  const cpuUsage = os.loadavg()[0] / os.cpus().length;
-  return Number((cpuUsage * 100).toFixed(2));
+
+function cpuTimes() {
+  return os.cpus().reduce(
+    (acc, cpu) => {
+      const t = cpu.times;
+      acc.idle += t.idle;
+      acc.total += t.user + t.nice + t.sys + t.idle + t.irq;
+      return acc;
+    },
+    { idle: 0, total: 0 }
+  );
+}
+let previousCpuTimes = cpuTimes();
+function getCpuUtilization() {
+  const current = cpuTimes();
+  const idle = current.idle - previousCpuTimes.idle;
+  const total = current.total - previousCpuTimes.total;
+  previousCpuTimes = current;
+  return total > 0 ? 1 - idle / total : 0;
 }
 
-function getMemoryUsagePercentage() {
-  const totalMemory = os.totalmem();
-  const freeMemory = os.freemem();
-  const usedMemory = totalMemory - freeMemory;
-  const memoryUsage = (usedMemory / totalMemory) * 100;
-  return Number(memoryUsage.toFixed(2));
+// Memory utilization (0-1)
+function getMemoryUtilization() {
+  return (os.totalmem() - os.freemem()) / os.totalmem();
 }
 
 // Starts the OpenTelemetry SDK, which exports all metrics to Grafana every `period` ms
@@ -86,34 +123,46 @@ function sendMetricsPeriodically(period) {
   });
 
   const meterProvider = new MeterProvider({
-    resource: resourceFromAttributes({ 'service.name': config.metrics.source }),
+
+    resource: resourceFromAttributes({
+      [ATTR_SERVICE_NAME]: config.metrics.source,
+      [ATTR_SERVICE_VERSION]: version.version,
+      [ATTR_SERVICE_INSTANCE_ID]: os.hostname(),
+    }),
     readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: period, exportTimeoutMillis: period })],
   });
 
-  const meter = meterProvider.getMeter('jwt-pizza-service');
+  const meter = meterProvider.getMeter('jwt-pizza-service', version.version);
 
   instruments = {
-    httpRequests: meter.createCounter('http_requests', { unit: '1' }),
-    httpErrors: meter.createCounter('http_errors', { unit: '1' }),
-    authAttempts: meter.createCounter('auth_attempts', { unit: '1' }),
-    pizzasSold: meter.createCounter('pizzas_sold', { unit: '1' }),
-    pizzaCreationFailures: meter.createCounter('pizza_creation_failures', { unit: '1' }),
-    pizzaRevenue: meter.createCounter('pizza_revenue', { unit: '1' }),
-    // Average latency = rate(total latency) / rate(request count)
-    endpointLatency: meter.createCounter('endpoint_latency', { unit: 'ms' }),
-    endpointLatencyRequests: meter.createCounter('endpoint_latency_requests', { unit: '1' }),
-    pizzaCreationLatency: meter.createCounter('pizza_creation_latency', { unit: 'ms' }),
-    pizzaCreationRequests: meter.createCounter('pizza_creation_requests', { unit: '1' }),
+    httpServerDuration: meter.createHistogram(METRIC_HTTP_SERVER_REQUEST_DURATION, {
+      unit: 's',
+      description: 'Duration of HTTP server requests.',
+      advice: { explicitBucketBoundaries: DURATION_BUCKETS },
+    }),
+
+
+    authAttempts: meter.createCounter('pizza.auth.attempts', { unit: '{attempt}', description: 'Login attempts.' }),
+    orders: meter.createCounter('pizza.orders', { unit: '{order}', description: 'Orders sent to the pizza factory.' }),
+    pizzasSold: meter.createCounter('pizza.sold', { unit: '{pizza}', description: 'Pizzas successfully sold.' }),
+    revenue: meter.createCounter('pizza.revenue', { unit: '{bitcoin}', description: 'Revenue from pizzas sold.' }),
+    factoryDuration: meter.createHistogram('pizza.factory.duration', {
+      unit: 's',
+      description: 'Time for the pizza factory to fulfill an order.',
+      advice: { explicitBucketBoundaries: DURATION_BUCKETS },
+    }),
   };
 
-  meter.createObservableGauge('active_users', { unit: '{users}' }).addCallback((result) => {
-    result.observe(getActiveUserCount(), commonAttributes);
+  meter.createObservableGauge('pizza.users.active', { unit: '{user}', description: 'Users with a request in the last 5 minutes.' }).addCallback((result) => {
+    result.observe(getActiveUserCount());
   });
-  meter.createObservableGauge('cpu_usage', { unit: '%' }).addCallback((result) => {
-    result.observe(getCpuUsagePercentage(), commonAttributes);
+
+
+  meter.createObservableGauge('system.cpu.utilization', { unit: '1', description: 'CPU utilization across all cores.' }).addCallback((result) => {
+    result.observe(getCpuUtilization());
   });
-  meter.createObservableGauge('memory_usage', { unit: '%' }).addCallback((result) => {
-    result.observe(getMemoryUsagePercentage(), commonAttributes);
+  meter.createObservableGauge('system.memory.utilization', { unit: '1', description: 'Fraction of memory in use.' }).addCallback((result) => {
+    result.observe(getMemoryUtilization(), { 'system.memory.state': 'used' });
   });
 
   return meterProvider;
